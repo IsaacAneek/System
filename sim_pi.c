@@ -4,7 +4,7 @@
 #include <time.h>
 
 int main(int argc, char **argv) {
-    long long int samples = 50000000;
+    long long int samples = 50000000; // 50 Million samples per node
     long long int hits = 0;
     int rank = 0;
     int size = 1;
@@ -12,12 +12,14 @@ int main(int argc, char **argv) {
 
     gethostname(hostname, sizeof(hostname));
 
+    // Slurm injects these environment variables automatically across the cluster
     char *env_rank = getenv("SLURM_PROCID");
     char *env_size = getenv("SLURM_NTASKS");
 
     if (env_rank) rank = atoi(env_rank);
     if (env_size) size = atoi(env_size);
 
+    // Ensure completely unique random seed per node
     unsigned int seed = time(NULL) + rank * 9999;
     srand(seed);
 
