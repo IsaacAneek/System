@@ -7,8 +7,6 @@ When you ran the `benchmark.sh` scripts for the Logistic Regression and the Nump
 
 This is a stark contrast to the **~1.1x** speedup we observed during the PyTorch TinyYOLO training. Why did these specific architectures scale so beautifully across the Raspberry Pi hardware? To understand exactly why this happens, we have to look at the physics of network packets, the mathematical proof of Amdahl's Law, and the multidimensional geometry of Neural Network Loss Landscapes.
 
----
-
 ## 1. The Compute-to-Communication Ratio (Vindicated)
 
 In `BOTTLENECK.md`, we discussed how PyTorch DDP forced the nodes to synchronize their gradients over the TCP network **390 times every epoch**. The network latency swallowed the CPU compute gains.
@@ -23,8 +21,6 @@ Let's look at the math and physics behind the Neural Network benchmark:
 * **The Ratio**: Transmitting 17 floats over standard Ethernet takes a fraction of a millisecond. Therefore, the Pi spent **99.99%** of its time computing, and **0.01%** of its time waiting on the network. The network overhead is mathematically zero.
 
 By contrast, the PyTorch DDP run (156,000 parameters) required sending roughly **416 TCP packets** per batch. Multiplied by 390 batches, the Pis were firing **162,240 TCP packets per epoch**, destroying the Compute-to-Communication ratio.
-
----
 
 ## 2. Amdahl's Law Approaching Perfection
 
@@ -49,8 +45,6 @@ $$ 1.99 = \frac{1}{(1 - P) + \frac{P}{2}} $$
 $$ 1.99 \times (1 - 0.5P) = 1 $$
 $$ 1.99 - 0.995P = 1 \implies 0.99 = 0.995P \implies P \approx 0.995 $$
 **Conclusion**: The network was so efficient that **99.5% of the workload was pure, parallelized CPU math**. 
-
----
 
 ## 3. The Catch: The "Trade-off" of Federated Averaging
 
