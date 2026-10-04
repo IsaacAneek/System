@@ -46,15 +46,15 @@ echo "      Master: $PI02:$MASTER_PORT | World size: 2"
 echo "      Backend: Gloo (CPU-only distributed)"
 echo ""
 
-# Get pi02's IP for MASTER_ADDR
-MASTER_IP=$(ssh ${PI_USER}@${PI02} "hostname -I | awk '{print \$1}'")
+# Get pi02's physical LAN IP for MASTER_ADDR
+MASTER_IP=$(ssh ${PI_USER}@${PI02} "ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}'")
 
 # Launch rank 0 on pi02 (background)
-ssh ${PI_USER}@${PI02} "MASTER_ADDR=$MASTER_IP MASTER_PORT=$MASTER_PORT RANK=0 WORLD_SIZE=2 python3 /tmp/worker.py" &
+ssh ${PI_USER}@${PI02} "GLOO_SOCKET_IFNAME=eth0 MASTER_ADDR=$MASTER_IP MASTER_PORT=$MASTER_PORT RANK=0 WORLD_SIZE=2 python3 /tmp/worker.py" &
 PID0=$!
 
 # Launch rank 1 on pi03
-ssh ${PI_USER}@${PI03} "MASTER_ADDR=$MASTER_IP MASTER_PORT=$MASTER_PORT RANK=1 WORLD_SIZE=2 python3 /tmp/worker.py" &
+ssh ${PI_USER}@${PI03} "GLOO_SOCKET_IFNAME=eth0 MASTER_ADDR=$MASTER_IP MASTER_PORT=$MASTER_PORT RANK=1 WORLD_SIZE=2 python3 /tmp/worker.py" &
 PID1=$!
 
 # Wait for both to finish
