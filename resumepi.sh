@@ -1,0 +1,1 @@
+sudo scontrol update NodeName=pi03 State=RESUME
