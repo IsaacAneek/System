@@ -60,5 +60,19 @@ echo "------------------------------------------------------------"
 
 # Compute speedup ratio
 SPEEDUP=$(awk "BEGIN {printf \"%.2f\", $SINGLE_TIME / $DIST_TIME}")
+IDEAL_TIME=$(awk "BEGIN {printf \"%.3f\", $SINGLE_TIME / 2}")
+NETWORK_TIME=$(awk "BEGIN { net = $DIST_TIME - $IDEAL_TIME; if (net < 0) net = 0.000; printf \"%.3f\", net }")
+COMPUTE_PCT=$(awk "BEGIN {printf \"%.1f\", ($IDEAL_TIME / $DIST_TIME) * 100}")
+NETWORK_PCT=$(awk "BEGIN {printf \"%.1f\", ($NETWORK_TIME / $DIST_TIME) * 100}")
+
 echo "Speedup Multiplier: ${SPEEDUP}x"
+echo ""
+echo "------------------------------------------------------------"
+echo "               COMPUTE VS NETWORK PROFILING                 "
+echo "------------------------------------------------------------"
+printf "%-30s | %-15s\n" "Ideal Compute Time (Expected)" "${IDEAL_TIME} s"
+printf "%-30s | %-15s\n" "Network / Sync Overhead" "${NETWORK_TIME} s"
+echo "------------------------------------------------------------"
+printf "%-30s | %-15s\n" "Time Computing Math" "${COMPUTE_PCT}%%"
+printf "%-30s | %-15s\n" "Time Blocked by Network" "${NETWORK_PCT}%%"
 echo "============================================================"
