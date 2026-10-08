@@ -45,3 +45,28 @@ Throughout the deployment of this mixed-architecture cluster (x86_64 Controller 
 **Bug/Limitation**: Running the MPI binary directly with `srun` threw an OMPI error: `OMPI was not built with SLURM's PMI support and therefore cannot execute`.
 **Effect**: The version of OpenMPI provided by Debian's APT repositories was not compiled against the Slurm libraries required for seamless `srun` integration (PMIx/PMI2).
 **Resolution**: Fallbacked to a standard C-based Hello World binary that proved Slurm allocation and dispatch worked flawlessly without relying on the unlinked OpenMPI libraries.
+
+## 10. The `srun --bcast` Python Bug
+**Bug/Limitation**: Attempting to broadcast and execute a Python script using Slurm's standard format: `srun --bcast=/tmp/script.py python3 /tmp/script.py`.
+**Effect**: Slurm automatically parsed the first positional argument (`python3`) as the target binary to broadcast. It copied the PC's x86_64 python interpreter to the ARM64 Raspberry Pis and overwrote the script, resulting in an immediate `Exec format error` crash.
+**Resolution**: Added a Python shebang (`#!/usr/bin/env python3`) to the top of the scripts, made them locally executable with `chmod +x`, and executed them directly: `srun --bcast=/tmp/target_name.py /path/to/local_script.py`.
+
+## 11. PyTorch DDP Gloo Interface Binding
+**Bug/Limitation**: PyTorch's `DistributedDataParallel` (DDP) defaults to using the system hostname to resolve the network interface for its Gloo backend.
+**Effect**: On Debian/Raspberry Pi OS, `/etc/hosts` often maps the hostname to `127.0.1.1` (loopback). This caused DDP to bind its rendezvous server to the internal loopback rather than the physical LAN interface, resulting in infinite hangs and `Connection refused` timeouts during the gradient synchronization phase.
+**Resolution**: Extracted the exact LAN IP using `ip -4 addr show eth0` and forcefully injected network parameters into the PyTorch environment prior to launch: `GLOO_SOCKET_IFNAME=eth0 MASTER_ADDR=$MASTER_IP`.
+
+## 12. Edge Hardware Memory Exhaustion (OOM Reboots)
+**Bug/Limitation**: Training deep neural networks (like YOLO from scratch) requires storing massive forward activation graphs and backward gradients in RAM.
+**Effect**: The Raspberry Pi's limited 8GB RAM was rapidly exhausted, triggering the Linux OOM (Out Of Memory) killer. In some cases, the memory pressure was so violent it caused the OS to lock up and completely hard reboot mid-training.
+**Resolution**: Drastically slashed the `DataLoader` batch sizes (e.g., to 64 or 32) and reduced `num_workers` to prevent explosive memory spikes.
+
+## 13. Slurm Node Desynchronization (`idle*` state)
+**Bug/Limitation**: When a Raspberry Pi crashes (due to the aforementioned OOM spikes) or is manually power-cycled, it drops off the network unexpectedly.
+**Effect**: The PC's `slurmctld` controller detects the missing heartbeat and marks the node state with an asterisk (`idle*`), indicating it is unresponsive. Any subsequent `srun` tasks requesting that node will hang indefinitely in a `queued and waiting for resources` state, even after the Pi finishes booting back up.
+**Resolution**: The connection must be manually re-established by SSHing into the affected Pi and running `sudo systemctl restart slurmd` to force the daemon to "phone home" to the controller.
+
+## 14. DDP Latency Bottleneck (Amdahl's Law on the Edge)
+**Bug/Limitation**: The PyTorch DDP framework is mathematically strict and forces an All-Reduce gradient synchronization on *every single batch*.
+**Effect**: Even when utilizing Transfer Learning to freeze layers and slash the network payload down to a microscopic 20 KB per batch, the physical TCP Ping Latency of starting and stopping the CPU to negotiate packets caps the speedup. Adding 100% more hardware (a second Pi) only yielded a ~1.59x speedup because the CPU spends nearly 20% of its lifespan frozen waiting for network ACKs.
+**Resolution**: To achieve perfect 2.0x linear scaling on slow edge networks, PyTorch DDP's synchronous architecture must be abandoned in favor of **Federated Averaging**, where nodes train completely independently and only synchronize a single payload at the end of the epoch.
