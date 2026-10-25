@@ -14,6 +14,7 @@ import torchvision.models as models
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--data-dir', type=str, default='/mnt/nfs_share', help='Path to dataset directory')
     args = parser.parse_args()
 
     # DDP Initialization
@@ -27,10 +28,11 @@ def main():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     
+    data_path = args.data_dir if os.path.exists(args.data_dir) else "/tmp/cifar10_data"
     if rank == 0:
-        print("[Master] Loading CIFAR-10 dataset...", flush=True)
+        print(f"[Master] Loading CIFAR-10 dataset from {data_path}...", flush=True)
         
-    dataset = torchvision.datasets.CIFAR10(root="/tmp/cifar10_data", train=True, download=True, transform=transform_train)
+    dataset = torchvision.datasets.CIFAR10(root=data_path, train=True, download=False, transform=transform_train)
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
     dataloader = DataLoader(dataset, batch_size=32, sampler=sampler, num_workers=2)
         

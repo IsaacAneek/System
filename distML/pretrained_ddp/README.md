@@ -8,6 +8,7 @@ To match our standard cluster convention, this pipeline is split into distinct p
 * `inference.py`: Runs locally on the master PC controller. It initializes a blank ResNet-18, loads the distributed weights retrieved from the cluster, and evaluates the final accuracy.
 * `dispatch.sh`: The standard bash orchestrator. It handles deployment, dataset syncing, DDP rendezvous, weight retrieval, and local inference execution.
 * `benchmark_node.py` & `benchmark.sh`: Segregated scripts used purely for profiling speedup metrics on a 1,000-image subset.
+* `benchmark_nfs.sh`: Dedicated benchmark suite comparing Local SD Card Storage vs. Shared NFS Storage side-by-side to detect filesystem bottlenecks.
 
 ## The Transfer Learning Pipeline
 

@@ -18,17 +18,17 @@ echo -e "\n[1/4] Deploying script to edge nodes..."
 scp -q "$WORKER" ${PI_USER}@${PI02}:/tmp/worker.py
 scp -q "$WORKER" ${PI_USER}@${PI03}:/tmp/worker.py
 
-echo -e "\n[2/4] Verifying CIFAR-10 dataset (downloading if necessary)..."
-ssh ${PI_USER}@${PI02} "python3 -c \"import torchvision; torchvision.datasets.CIFAR10(root='/tmp/cifar10_data', train=True, download=True)\"" >/dev/null 2>&1
-ssh ${PI_USER}@${PI02} "scp -q -r -o StrictHostKeyChecking=no /tmp/cifar10_data ${PI_USER}@${PI03}:/tmp/" 2>/dev/null || true
+echo -e "\n[2/4] Verifying CIFAR-10 dataset on shared NFS mount (/mnt/nfs_share)..."
+ssh ${PI_USER}@${PI02} "python3 -c \"import torchvision; torchvision.datasets.CIFAR10(root='/mnt/nfs_share', train=True, download=False)\""
+ssh ${PI_USER}@${PI03} "python3 -c \"import torchvision; torchvision.datasets.CIFAR10(root='/mnt/nfs_share', train=True, download=False)\""
 
-echo -e "\n[3/4] Launching Distributed Training (Transfer Learning)..."
+echo -e "\n[3/4] Launching Distributed Training (Transfer Learning via NFS)..."
 MASTER_IP=$(ssh ${PI_USER}@${PI02} "ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}'")
 
-ssh ${PI_USER}@${PI02} "GLOO_SOCKET_IFNAME=eth0 MASTER_ADDR=$MASTER_IP MASTER_PORT=$MASTER_PORT RANK=0 WORLD_SIZE=2 python3 -u /tmp/worker.py --epochs 1" &
+ssh ${PI_USER}@${PI02} "GLOO_SOCKET_IFNAME=eth0 MASTER_ADDR=$MASTER_IP MASTER_PORT=$MASTER_PORT RANK=0 WORLD_SIZE=2 python3 -u /tmp/worker.py --epochs 1 --data-dir /mnt/nfs_share" &
 PID0=$!
 
-ssh ${PI_USER}@${PI03} "GLOO_SOCKET_IFNAME=eth0 MASTER_ADDR=$MASTER_IP MASTER_PORT=$MASTER_PORT RANK=1 WORLD_SIZE=2 python3 -u /tmp/worker.py --epochs 1" &
+ssh ${PI_USER}@${PI03} "GLOO_SOCKET_IFNAME=eth0 MASTER_ADDR=$MASTER_IP MASTER_PORT=$MASTER_PORT RANK=1 WORLD_SIZE=2 python3 -u /tmp/worker.py --epochs 1 --data-dir /mnt/nfs_share" &
 PID1=$!
 
 wait $PID0

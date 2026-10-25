@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--distributed', action='store_true')
     parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--samples', type=int, default=1000) # Subset for faster benchmarking on CPU
+    parser.add_argument('--data-dir', type=str, default='/tmp/cifar10_data', help='Path to dataset directory')
     args = parser.parse_args()
 
     rank = 0
@@ -36,10 +37,9 @@ def main():
     ])
     
     if rank == 0:
-        print(f"[Master] Loading CIFAR-10 dataset (may take a moment to verify/download)...", flush=True)
+        print(f"[Master] Loading CIFAR-10 dataset from {args.data_dir}...", flush=True)
         
-    # We assume data is already present from dispatch.sh to avoid network skew
-    dataset = torchvision.datasets.CIFAR10(root="/tmp/cifar10_data", train=True, download=True, transform=transform_train)
+    dataset = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=False, transform=transform_train)
     
     # Subset dataset for benchmarking to keep times reasonable on edge CPUs
     indices = list(range(args.samples))

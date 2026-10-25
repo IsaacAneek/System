@@ -83,7 +83,54 @@ sudo systemctl enable --now slurmctld
 
 ---
 
-## Part 2: Cross-Compiling & Dispatching
+## Part 2: Shared Network Storage Setup (NFS)
+
+In an edge cluster, replicating heavy datasets (e.g., CIFAR-10, ImageNet) onto every individual node via SSH/SCP quickly exhausts limited microSD card storage and creates network transfer bottlenecks. To solve this, a **Network File System (NFSv4)** was deployed across the Raspberry Pi nodes so both compute nodes access a unified shared directory without local duplication.
+
+### 1. NFS Server Configuration (`pi02.local` - 192.168.10.150)
+Install `nfs-kernel-server` on `pi02` and export the shared dataset directory to the cluster:
+
+```bash
+# On pi02:
+sudo apt-get update && sudo apt-get install -y nfs-kernel-server
+sudo mkdir -p /srv/nfs/cifar10_data
+sudo chown -R pi:pi /srv/nfs
+sudo chmod -R 777 /srv/nfs
+
+# Configure export in /etc/exports
+sudo bash -c 'cat << "EOF" > /etc/exports
+/srv/nfs/cifar10_data *(rw,sync,no_subtree_check,no_root_squash)
+EOF'
+
+# Apply export and enable daemon
+sudo exportfs -arv
+sudo systemctl restart nfs-kernel-server
+sudo systemctl enable nfs-kernel-server
+```
+
+### 2. NFS Client & Mount Setup (`pi02.local` & `pi03.local`)
+Create the mount point `/mnt/nfs_share` on both compute nodes and mount the NFS share:
+
+```bash
+# Executed on both pi02 and pi03:
+sudo apt-get install -y nfs-common
+sudo mkdir -p /mnt/nfs_share
+sudo mount -t nfs 192.168.10.150:/srv/nfs/cifar10_data /mnt/nfs_share
+
+# Persist mount across reboots in /etc/fstab:
+echo "192.168.10.150:/srv/nfs/cifar10_data /mnt/nfs_share nfs defaults,_netdev 0 0" | sudo tee -a /etc/fstab
+```
+
+### 3. Verification & Zero-Copy Dataset Streaming
+With NFS active, the dataset resides physically only on `pi02`'s disk:
+* Worker nodes (`pi02` and `pi03`) stream training batches directly from `/mnt/nfs_share` via PyTorch `DataLoader`.
+* Eliminates dataset SSH broadcast time (`scp` step removed).
+* Bypasses the edge node storage limits (prevents `No space left on device` on worker Pis).
+* Benchmarking demonstrates that Gigabit LAN streaming (~115 MB/s) delivers throughput comparable to or faster than local microSD flash reads with only +3.15% overhead.
+
+---
+
+## Part 3: Cross-Compiling & Dispatching
 
 Because the controller is `x86_64` and the nodes are `ARM64`, binaries compiled on the PC will return an `Exec format error` on the Pis. Furthermore, without a shared Network File System (NFS), the binary must be manually broadcasted.
 
@@ -138,12 +185,12 @@ srun --chdir=/tmp --bcast=/tmp/sim_pi_arm -N 2 /tmp/sim_pi_arm
 
 ---
 
-## Part 3: Drawbacks & Limitations Faced
+## Part 4: Drawbacks & Limitations Faced
 
 1. **Protocol Version Drift ("Insane Message Length")**: Slurm tightly couples controller and node versions. Ubuntu 26 provided v25, while Debian 12 provided v22. This mismatch caused immediate RPC communication failures. This required abandoning the APT package on the controller and compiling from source to match the Pis.
 2. **GCC 14 C23 Strictness**: Compiling the legacy Slurm v22 codebase on Ubuntu 26 failed due to modern GCC 14 enforcing strict prototypes (`()` treated as zero arguments instead of unspecified). Fixed by injecting `CFLAGS="-std=gnu99"`.
 3. **PMIx Exascale Plugin Incompatibilities**: Advanced MPI plugins in older Slurm versions failed to build against modern Ubuntu 26 libraries. Fixed by skipping it (`--without-pmix`), as it isn't strictly required for standard task dispatching.
 4. **Database State Corruption Prevention**: After downgrading Slurm, the controller refused to start because it detected v25 state files in `/var/lib/slurmctld/`. Required a manual purge of the directory.
 5. **Debian OpenMPI Lacking PMI**: The default OpenMPI package on Debian 12 is not compiled against Slurm's PMI libraries, preventing `srun` from natively launching MPI communicators out-of-the-box (yielding `OMPI was not built with SLURM's PMI support`). This limitation was bypassed by relying on Slurm's native task environment variables (`SLURM_PROCID`) for parallelization instead of MPI.
-6. **No Shared Filesystem**: Because `/home/isaac-aneek` does not exist on the Pis, Slurm failed to find the working directory or the executable. Overcome by using the `/tmp` directory and Slurm's built-in `--bcast` argument to transfer the executable dynamically.
+6. **No Shared Filesystem (Resolved via NFS)**: Because `/home/isaac-aneek` does not exist on the Pis, Slurm originally failed to find the working directory or the executable without `--bcast`. Furthermore, edge worker nodes quickly ran out of disk space (`No space left on device`) when trying to copy machine learning datasets locally via `scp`. This limitation was comprehensively solved by configuring an **NFSv4 mount (`/mnt/nfs_share`)** across both Pis, allowing datasets and scripts to be shared with zero-copy overhead.
 7. **Cross-Architecture Execution (x86 vs ARM)**: Binaries compiled on the controller immediately triggered `Exec format error` on the compute nodes. Overcome by compiling natively via SSH on the edge devices.
