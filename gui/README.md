@@ -1,30 +1,39 @@
 # Dear ImGui NFS Mount Explorer (Monkeytype Theme)
 
-A sleek, fast desktop GUI built with **Dear ImGui** (`dearpygui`) that automatically discovers, inspects, mounts, and unmounts NFS file systems on your local network.
+A fast, dynamic desktop GUI built with **Dear ImGui** (`dearpygui`) that discovers, inspects, mounts, and unmounts NFS file systems on your network.
 
-Styled with the iconic **Monkeytype** color palette (matte charcoal canvas, off-white text, muted slate borders, and signature gold accent buttons).
+> **Zero Hardcoded Hosts**: Does NOT rely on hardcoded IPs or hostnames. You can type/paste targets, load a file, or click one button to scan your local network using **Nmap** or **arp-scan + avahi-resolve**.
 
 ---
 
-## Features
+## Key Features
 
-1. **Automatic Network Discovery (mDNS & DNS-SD)**:
-   - Queries `avahi-browse` for `_nfs._tcp` and `_workstation._tcp` service records across the local area network.
-   - Automatically probes `.local` hostnames (e.g. `pi02.local`, `pi03.local`) and `/etc/hosts` cluster definitions.
-2. **NFS Export Inspection (`showmount`)**:
-   - Executes `showmount -e <host>` behind the scenes to list all exported remote directories, permissions, and allowed client subnets.
-   - Includes a manual IP/hostname query bar to probe any specific NFS server immediately.
-3. **Interactive Mount Modal Popup**:
-   - Clicking **"Mount..."** opens an interactive pop-up dialog.
-   - Allows typing or browsing for the local mount directory (defaults to clean paths like `/mnt/nfs_<export_name>`).
-   - Offers custom mount option flags (default: `rw,sync,noatime,_netdev`).
-   - Handles `mkdir -p` automatically if the target directory does not yet exist.
-4. **Active System Mounts & Unmounting**:
-   - Parses `/proc/mounts` in real-time to display all active NFS mounts in the OS.
-   - Displays live disk storage and percentage used (`os.statvfs`).
-   - Provides a one-click **"Unmount"** button (with automatic fallback to lazy unmount `-l` if files are in use).
-5. **Execution & Command Log**:
-   - Real-time terminal log panel at the bottom displaying command outputs, timestamps, and error diagnostics.
+### 1. Flexible Host Target Management
+* **Multiline Text Input**: Type or paste hostnames or IPs directly into an editable multiline text area (separated by newlines, commas, or spaces).
+* **File Import**: Browse and load hosts directly from a file (e.g. `/etc/hosts` or a custom list).
+* **Query Showmount on Targets**: Queries `showmount -e` across all listed hosts and lists their exported folders.
+
+### 2. Automated Network Scanners
+* **Scan LAN (Nmap)**:
+  * Auto-detects local IPv4 subnets (e.g. `192.168.10.0/24`).
+  * Scans for open NFS ports (`-p 2049 --open`) or performs host sweeps.
+  * Resolves hostnames and automatically appends discovered hosts into the target list.
+* **Scan (arp-scan + avahi-resolve)**:
+  * Uses `arp-scan` (or kernel neighbor table fallback) to discover active LAN IP addresses.
+  * Uses `avahi-resolve -a <IP>` to resolve each IP to its **`.local` mDNS hostname** (e.g. `pi02.local`).
+  * Automatically populates the target list and queries exports.
+
+### 3. Interactive Mount Modal Popup
+* Clicking **"Mount..."** opens an interactive pop-up dialog.
+* **Mount Point Selection**: Type a custom path (defaults to `/mnt/nfs_<export_name>`) or click **Browse** to open an interactive directory picker.
+* **Mount Options**: Configurable options string (default: `rw,sync,noatime,_netdev`).
+* **Privilege Handling**: Supports polkit (`pkexec`) or sudo password input.
+* **Auto-creation**: Automatically runs `mkdir -p` if the target mount directory doesn't exist yet.
+
+### 4. Active System Mounts & Unmounting
+* Parses `/proc/mounts` in real-time to show all active NFS file systems attached to your OS.
+* Shows live disk usage and free space calculations (`os.statvfs`).
+* **Unmount Button**: One-click unmount with automatic fallback to lazy unmount (`-l`) if files are in use.
 
 ---
 
@@ -45,7 +54,7 @@ Styled with the iconic **Monkeytype** color palette (matte charcoal canvas, off-
 
 ## How to Run
 
-### Option 1: Quick Launcher (Automatic Environment Setup)
+### Quick Launcher (Recommended)
 ```bash
 cd ~/Practice/System/gui
 chmod +x run.sh app.py nfs_manager.py
@@ -53,21 +62,8 @@ chmod +x run.sh app.py nfs_manager.py
 ```
 *The launcher checks if `dearpygui` is installed; if not, it automatically sets up an isolated virtual environment in `gui/.venv` and launches the application.*
 
-### Option 2: Direct Python Execution
-If you already have `dearpygui` installed:
+### Direct Python Execution
 ```bash
 cd ~/Practice/System/gui
 python3 app.py
 ```
-
----
-
-## Requirements
-
-* **Python 3.8+**
-* **DearPyGui**: `pip install dearpygui --break-system-packages`
-* **System Utilities**: `nfs-common` (for `showmount` and `mount.nfs`):
-  ```bash
-  sudo apt install -y nfs-common
-  ```
-

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 NFS Manager Backend:
-Handles mDNS & DNS-SD service discovery, querying showmount/showexports,
-parsing active OS mounts from /proc/mounts, and mounting/unmounting NFS shares.
+Handles dynamic network discovery (nmap subnet scan, arp-scan + avahi-resolve, mDNS DNS-SD),
+querying showmount on user-defined host lists, parsing active OS mounts from /proc/mounts,
+and mounting/unmounting NFS shares. No hardcoded hosts.
 """
 
 import os
@@ -10,6 +11,7 @@ import re
 import socket
 import shutil
 import subprocess
+import ipaddress
 
 
 class NFSShare:
@@ -62,92 +64,292 @@ class ActiveMount:
 
 class NFSManager:
     """
-    Manages discovery, querying, mounting, and unmounting of NFS shares.
+    Manages dynamic discovery, querying, mounting, and unmounting of NFS shares.
+    Zero hardcoded hosts.
     """
 
     def __init__(self):
-        self.known_candidate_hosts = [
-            "pi02.local",
-            "pi03.local",
-            "pi01.local",
-            "localhost",
-            "127.0.0.1",
-            "192.168.10.150",
-            "192.168.10.101",
-        ]
+        pass
 
-    def discover_mdns_hosts(self):
+    # -----------------------------------------------------------------------
+    # Subnet Detection
+    # -----------------------------------------------------------------------
+    def get_local_subnets(self):
         """
-        Scans for hosts advertising services or resolves .local hostnames via mDNS / avahi / system resolver.
+        Auto-detects active IPv4 subnets from system network interfaces using 'ip'.
+        Returns list of CIDRs, e.g. ['192.168.10.0/24'].
         """
-        found_hosts = set()
-
-        # 1. Check avahi-browse for DNS-SD (_nfs._tcp, _workstation._tcp)
-        avahi_bin = shutil.which("avahi-browse")
-        if avahi_bin:
-            try:
-                # Query _nfs._tcp
-                proc = subprocess.run(
-                    [avahi_bin, "-rt", "_nfs._tcp", "--parsable"],
-                    capture_output=True,
-                    text=True,
-                    timeout=3
-                )
-                for line in proc.stdout.splitlines():
-                    parts = line.split(";")
-                    # Format: =;eth0;IPv4;Service Name;_nfs._tcp;local;hostname.local;ip;port
-                    if len(parts) >= 8 and parts[6]:
-                        found_hosts.add(parts[6].strip())
-                        if parts[7]:
-                            found_hosts.add(parts[7].strip())
-
-                # Query general workstations on mDNS
-                proc2 = subprocess.run(
-                    [avahi_bin, "-rt", "_workstation._tcp", "--parsable"],
-                    capture_output=True,
-                    text=True,
-                    timeout=3
-                )
-                for line in proc2.stdout.splitlines():
-                    parts = line.split(";")
-                    if len(parts) >= 8 and parts[6]:
-                        host = parts[6].strip()
-                        if host.endswith(".local"):
-                            found_hosts.add(host)
-            except Exception:
-                pass
-
-        # 2. Check /etc/hosts for cluster definitions
+        subnets = set()
         try:
-            with open("/etc/hosts", "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        parts = line.split()
-                        for p in parts[1:]:
-                            if "pi" in p.lower() or "cluster" in p.lower() or p.endswith(".local"):
-                                found_hosts.add(p)
+            proc = subprocess.run(["ip", "-o", "-f", "inet", "addr", "show"], capture_output=True, text=True, timeout=3)
+            for line in proc.stdout.splitlines():
+                parts = line.strip().split()
+                # Line format: <ifindex>: <ifname> inet <ip/prefix> ...
+                if len(parts) >= 4 and parts[2] == "inet":
+                    cidr = parts[3]
+                    if not cidr.startswith("127."):
+                        try:
+                            net = ipaddress.IPv4Interface(cidr).network
+                            subnets.add(str(net))
+                        except Exception:
+                            pass
         except Exception:
             pass
 
-        # 3. Add known cluster defaults
-        for cand in self.known_candidate_hosts:
-            found_hosts.add(cand)
+        return sorted(list(subnets))
 
-        # 4. Filter only hosts that resolve or respond
-        live_hosts = []
-        for h in sorted(found_hosts):
-            # Test socket resolution
+    # -----------------------------------------------------------------------
+    # Discovery Method 1: Nmap Subnet Scan
+    # -----------------------------------------------------------------------
+    def scan_network_nmap(self, subnet=None, scan_nfs_port=True, progress_cb=None):
+        """
+        Scans LAN using nmap.
+        If scan_nfs_port=True, scans for open NFS port 2049 directly.
+        Returns a list of dicts: [{'host': hostname_or_ip, 'ip': ip, 'name': hostname}]
+        """
+        nmap_bin = shutil.which("nmap")
+        if not nmap_bin:
+            raise FileNotFoundError("nmap is not installed or not in PATH.")
+
+        if not subnet:
+            detected = self.get_local_subnets()
+            subnet = detected[0] if detected else "192.168.1.0/24"
+
+        if progress_cb:
+            mode_str = "NFS port 2049" if scan_nfs_port else "ping sweep"
+            progress_cb(f"Running nmap ({mode_str}) on {subnet}...")
+
+        # If scan_nfs_port, probe port 2049 to find NFS servers fast
+        if scan_nfs_port:
+            cmd = [nmap_bin, "-p", "2049", "--open", "-T4", subnet]
+        else:
+            cmd = [nmap_bin, "-sn", "-T4", subnet]
+
+        discovered = []
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+            lines = proc.stdout.splitlines()
+
+            current_host = None
+            current_ip = None
+
+            for line in lines:
+                line = line.strip()
+                # Format: "Nmap scan report for pi02.local (192.168.10.150)"
+                # or:     "Nmap scan report for 192.168.10.150"
+                if line.startswith("Nmap scan report for"):
+                    parts = line.replace("Nmap scan report for ", "").strip()
+                    m = re.match(r"^(.*?)\s+\((.*?)\)$", parts)
+                    if m:
+                        current_host = m.group(1)
+                        current_ip = m.group(2)
+                    else:
+                        current_host = parts
+                        current_ip = parts
+
+                    # If nmap gave an IP without hostname, try avahi-resolve
+                    resolved_name = current_host
+                    if current_host == current_ip:
+                        avahi_name = self.resolve_avahi_ip(current_ip)
+                        if avahi_name:
+                            resolved_name = avahi_name
+
+                    discovered.append({
+                        "host": resolved_name,
+                        "ip": current_ip,
+                        "name": resolved_name
+                    })
+
+        except Exception as e:
+            if progress_cb:
+                progress_cb(f"Nmap scan error: {e}")
+
+        return discovered
+
+    # -----------------------------------------------------------------------
+    # Discovery Method 2: arp-scan + avahi-resolve
+    # -----------------------------------------------------------------------
+    def resolve_avahi_ip(self, ip):
+        """
+        Uses avahi-resolve -a <IP> to resolve IP to .local mDNS hostname.
+        """
+        avahi_res = shutil.which("avahi-resolve")
+        if not avahi_res:
+            return None
+        try:
+            proc = subprocess.run([avahi_res, "-a", ip], capture_output=True, text=True, timeout=2)
+            if proc.returncode == 0:
+                # Output: "192.168.10.150\tpi02.local"
+                parts = proc.stdout.strip().split()
+                if len(parts) >= 2:
+                    return parts[1]
+        except Exception:
+            pass
+        return None
+
+    def scan_network_arpscan(self, interface=None, progress_cb=None):
+        """
+        Scans LAN via arp-scan (or /proc/net/arp fallback), then resolves each IP using avahi-resolve.
+        Returns a list of dicts: [{'host': resolved_name_or_ip, 'ip': ip, 'name': resolved_name}]
+        """
+        arp_bin = shutil.which("arp-scan") or "/usr/sbin/arp-scan"
+        discovered_ips = set()
+
+        if progress_cb:
+            progress_cb("Running arp-scan to discover active LAN devices...")
+
+        # 1. Try running arp-scan
+        if os.path.exists(arp_bin):
+            cmd = [arp_bin, "--localnet"]
+            if interface:
+                cmd.extend(["-I", interface])
+
+            # arp-scan may require privileges; test unprivileged or pkexec
             try:
-                socket.getaddrinfo(h, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-                live_hosts.append(h)
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if proc.returncode == 0:
+                    for line in proc.stdout.splitlines():
+                        parts = line.strip().split()
+                        if len(parts) >= 2 and re.match(r"^\d+\.\d+\.\d+\.\d+$", parts[0]):
+                            discovered_ips.add(parts[0])
             except Exception:
-                # If resolution fails, keep it if it's a known IP or cluster host
-                if re.match(r"^\d+\.\d+\.\d+\.\d+$", h) or "pi0" in h:
-                    live_hosts.append(h)
+                pass
 
-        return live_hosts
+        # 2. Fallback: Parse /proc/net/arp and 'ip neigh' for active LAN IPs
+        if not discovered_ips:
+            if progress_cb:
+                progress_cb("Reading kernel ARP cache & neighbor table...")
+            try:
+                with open("/proc/net/arp", "r") as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) >= 4 and parts[2] != "0x0" and re.match(r"^\d+\.\d+\.\d+\.\d+$", parts[0]):
+                            if not parts[0].startswith("127."):
+                                discovered_ips.add(parts[0])
+            except Exception:
+                pass
 
+            try:
+                proc = subprocess.run(["ip", "neigh", "show"], capture_output=True, text=True, timeout=3)
+                for line in proc.stdout.splitlines():
+                    parts = line.strip().split()
+                    if parts and re.match(r"^\d+\.\d+\.\d+\.\d+$", parts[0]):
+                        if "REACHABLE" in line or "STALE" in line or "DELAY" in line:
+                            discovered_ips.add(parts[0])
+            except Exception:
+                pass
+
+        # 3. For each IP, run avahi-resolve to get the .local hostname
+        results = []
+        for idx, ip in enumerate(sorted(list(discovered_ips))):
+            if progress_cb:
+                progress_cb(f"Resolving mDNS for {ip} via avahi-resolve ({idx + 1}/{len(discovered_ips)})...")
+
+            hostname = self.resolve_avahi_ip(ip)
+
+            # Fallback to reverse DNS socket lookup
+            if not hostname:
+                try:
+                    host_info = socket.gethostbyaddr(ip)
+                    if host_info and host_info[0]:
+                        hostname = host_info[0]
+                except Exception:
+                    hostname = ip
+
+            results.append({
+                "host": hostname if hostname else ip,
+                "ip": ip,
+                "name": hostname if hostname else ip
+            })
+
+        return results
+
+    # -----------------------------------------------------------------------
+    # Discovery Method 3: DNS-SD (_nfs._tcp via avahi-browse)
+    # -----------------------------------------------------------------------
+    def scan_dnssd_nfs(self, progress_cb=None):
+        """
+        Discovers machines advertising NFS via DNS-SD (_nfs._tcp).
+        """
+        avahi_bin = shutil.which("avahi-browse")
+        if not avahi_bin:
+            return []
+
+        if progress_cb:
+            progress_cb("Querying DNS-SD for _nfs._tcp records...")
+
+        hosts = set()
+        try:
+            proc = subprocess.run(
+                [avahi_bin, "-rt", "_nfs._tcp", "--parsable"],
+                capture_output=True,
+                text=True,
+                timeout=4
+            )
+            for line in proc.stdout.splitlines():
+                parts = line.split(";")
+                if len(parts) >= 8:
+                    if parts[6]:
+                        hosts.add(parts[6].strip())
+                    if parts[7]:
+                        hosts.add(parts[7].strip())
+        except Exception:
+            pass
+
+        return [{"host": h, "ip": h, "name": h} for h in sorted(list(hosts))]
+
+    # -----------------------------------------------------------------------
+    # User Input & File Loading
+    # -----------------------------------------------------------------------
+    @staticmethod
+    def parse_hosts_text(text):
+        """
+        Parses multiline, space, or comma-separated text into a clean list of unique hosts.
+        Ignores blank lines and comments (#).
+        """
+        hosts = []
+        seen = set()
+        for raw_line in text.splitlines():
+            # Strip comments
+            line = raw_line.split("#")[0].strip()
+            if not line:
+                continue
+            # Split by comma or whitespace
+            tokens = re.split(r"[,\s]+", line)
+            for token in tokens:
+                token = token.strip()
+                if token and token not in seen:
+                    seen.add(token)
+                    hosts.append(token)
+        return hosts
+
+    @staticmethod
+    def load_hosts_from_file(file_path):
+        """
+        Reads candidate hosts from a specified file (e.g. /etc/hosts or custom hosts.txt).
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        hosts = []
+        seen = set()
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#")[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                # If /etc/hosts format: IP host1 host2 ...
+                for part in parts:
+                    part = part.strip()
+                    if part and part not in seen and not part.startswith("127.") and part != "::1":
+                        seen.add(part)
+                        hosts.append(part)
+        return hosts
+
+    # -----------------------------------------------------------------------
+    # Query Showmount on Target Hosts
+    # -----------------------------------------------------------------------
     def query_showmount(self, host):
         """
         Executes 'showmount -e <host>' to inspect all NFS exported directories on target.
@@ -173,30 +375,26 @@ class NFSManager:
                         shares.append(NFSShare(host=host, export_path=export_path, clients=clients))
                     elif len(parts) == 1:
                         shares.append(NFSShare(host=host, export_path=parts[0], clients="*"))
-            else:
-                err_msg = proc.stderr.strip() or "Connection refused / RPC error"
-                # If RPC failed or showmount failed, return empty
-                pass
         except Exception:
             pass
 
         return shares
 
-    def scan_all_exports(self, progress_callback=None):
+    def query_multiple_hosts(self, host_list, progress_callback=None):
         """
-        Discovers all mDNS hosts and queries their NFS exports.
+        Queries showmount across a list of user-provided hosts.
         """
-        hosts = self.discover_mdns_hosts()
         all_shares = []
-
-        for idx, host in enumerate(hosts):
+        for idx, host in enumerate(host_list):
             if progress_callback:
-                progress_callback(f"Querying exports on {host} ({idx + 1}/{len(hosts)})...")
+                progress_callback(f"Querying exports on: {host} ({idx + 1}/{len(host_list)})...")
             shares = self.query_showmount(host)
             all_shares.extend(shares)
-
         return all_shares
 
+    # -----------------------------------------------------------------------
+    # Mount & Unmount Operations
+    # -----------------------------------------------------------------------
     def get_active_mounts(self):
         """
         Inspects /proc/mounts to list currently mounted NFS file systems on this OS.
@@ -214,22 +412,11 @@ class NFSManager:
             pass
         return active
 
-    def is_mounted(self, source, mount_point=None):
-        """
-        Checks if a given NFS source or local mount point is actively mounted.
-        """
-        active_mounts = self.get_active_mounts()
-        for m in active_mounts:
-            if m.source == source or (mount_point and m.mount_point == mount_point):
-                return True, m.mount_point
-        return False, None
-
     def mount_share(self, source, mount_point, options="rw,sync,_netdev", sudo_password=None):
         """
         Mounts the NFS export to a local directory.
         Creates mount point if missing.
         """
-        # Ensure local mount point directory exists
         if not os.path.exists(mount_point):
             mkdir_cmd = ["mkdir", "-p", mount_point]
             self._run_privileged(mkdir_cmd, sudo_password)
@@ -251,14 +438,13 @@ class NFSManager:
         """
         Runs command via sudo or pkexec.
         """
-        # If already root
         if os.geteuid() == 0:
             full_cmd = cmd
             input_text = None
         elif sudo_password:
             full_cmd = ["sudo", "-S"] + cmd
             input_text = f"{sudo_password}\n"
-        elif shutil.which("pkexec") and os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
+        elif shutil.which("pkexec") and (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
             full_cmd = ["pkexec"] + cmd
             input_text = None
         else:
@@ -276,4 +462,3 @@ class NFSManager:
         output = proc.stdout.strip()
         error = proc.stderr.strip()
         return success, output if success else error
-

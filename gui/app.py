@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Dear ImGui NFS Explorer (Monkeytype Theme)
-Searches for exported NFS shares via mDNS & showmount, provides one-click
-mounting with interactive mount point configuration popups, and manages active OS mounts.
+Dynamic Network Discovery (nmap subnet scan, arp-scan + avahi-resolve, mDNS / DNS-SD),
+multiline host targets input, file-based host loading, showmount inspection,
+and interactive mount / unmount management.
 """
 
 import os
 import sys
-import time
 import threading
 from datetime import datetime
 
@@ -33,8 +33,8 @@ class NFSGuiApp:
         self.active_mounts = []
         self.selected_share_for_mount = None
 
-        # Threading flags
-        self.is_scanning = False
+        # Threading flag
+        self.is_busy = False
 
     def log(self, message, level="INFO"):
         now = datetime.now().strftime("%H:%M:%S")
@@ -42,13 +42,12 @@ class NFSGuiApp:
         if dpg.does_item_exist("log_box"):
             prev = dpg.get_value("log_box")
             new_text = f"{prev}\n{formatted}" if prev else formatted
-            # Keep log manageable
-            lines = new_text.splitlines()[-40:]
+            lines = new_text.splitlines()[-50:]
             dpg.set_value("log_box", "\n".join(lines))
 
     def setup_monkeytype_theme(self):
         """
-        Applies the iconic Monkeytype color palette:
+        Iconic Monkeytype color palette:
         - Canvas background: #323437 (50, 52, 55)
         - Panel background:  #2c2e31 (44, 46, 49)
         - Input field bg:    #242628 (36, 38, 40)
@@ -60,47 +59,39 @@ class NFSGuiApp:
         """
         with dpg.theme() as global_theme:
             with dpg.theme_component(dpg.mvAll):
-                # Window & Backgrounds
                 dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (50, 52, 55, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_ChildBg, (44, 46, 49, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_PopupBg, (44, 46, 49, 250))
                 dpg.add_theme_color(dpg.mvThemeCol_Border, (66, 69, 73, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_BorderShadow, (0, 0, 0, 0))
 
-                # Frames & Inputs
                 dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (36, 38, 40, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, (44, 46, 49, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, (50, 52, 55, 255))
 
-                # Title & Tabs
                 dpg.add_theme_color(dpg.mvThemeCol_TitleBg, (36, 38, 40, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, (44, 46, 49, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_Tab, (36, 38, 40, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_TabHovered, (226, 183, 20, 180))
                 dpg.add_theme_color(dpg.mvThemeCol_TabActive, (226, 183, 20, 255))
 
-                # Text
                 dpg.add_theme_color(dpg.mvThemeCol_Text, (209, 208, 197, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_TextDisabled, (100, 102, 105, 255))
 
-                # Buttons
                 dpg.add_theme_color(dpg.mvThemeCol_Button, (44, 46, 49, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (226, 183, 20, 180))
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (226, 183, 20, 255))
 
-                # Headers & Selection
                 dpg.add_theme_color(dpg.mvThemeCol_Header, (44, 46, 49, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (66, 69, 73, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (226, 183, 20, 200))
 
-                # Tables
                 dpg.add_theme_color(dpg.mvThemeCol_TableHeaderBg, (36, 38, 40, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_TableBorderLight, (66, 69, 73, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_TableBorderStrong, (100, 102, 105, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_TableRowBg, (44, 46, 49, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_TableRowBgAlt, (50, 52, 55, 255))
 
-                # Scrollbars & Misc
                 dpg.add_theme_color(dpg.mvThemeCol_ScrollbarBg, (36, 38, 40, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrab, (66, 69, 73, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabHovered, (226, 183, 20, 180))
@@ -108,7 +99,6 @@ class NFSGuiApp:
                 dpg.add_theme_color(dpg.mvThemeCol_CheckMark, (226, 183, 20, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_Separator, (66, 69, 73, 255))
 
-                # Rounding Styles
                 dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 5)
                 dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 8)
                 dpg.add_theme_style(dpg.mvStyleVar_PopupRounding, 8)
@@ -135,58 +125,134 @@ class NFSGuiApp:
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (180, 50, 65, 255))
                 dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 5)
 
-    def trigger_scan_async(self):
-        if self.is_scanning:
-            return
-        self.is_scanning = True
-        dpg.set_value("status_text", "Scanning network (mDNS / showmount)...")
-        threading.Thread(target=self._scan_worker, daemon=True).start()
+    # -----------------------------------------------------------------------
+    # Target List Management (Text Field & File Loading)
+    # -----------------------------------------------------------------------
+    def get_current_target_hosts(self):
+        text = dpg.get_value("targets_text_input") or ""
+        return self.mgr.parse_hosts_text(text)
 
-    def _scan_worker(self):
+    def append_target_hosts(self, new_hosts):
+        current_hosts = self.get_current_target_hosts()
+        seen = set(current_hosts)
+        added = []
+        for h in new_hosts:
+            if h not in seen:
+                seen.add(h)
+                current_hosts.append(h)
+                added.append(h)
+
+        dpg.set_value("targets_text_input", "\n".join(current_hosts))
+        return added
+
+    def load_hosts_from_file_cb(self):
+        file_path = dpg.get_value("hosts_file_path").strip()
+        if not file_path:
+            self.log("Please specify a valid file path to load.", level="WARN")
+            return
         try:
-            self.log("Starting network discovery (mDNS / DNS-SD / showmount)...")
-            shares = self.mgr.scan_all_exports(progress_callback=lambda msg: self.log(msg))
-            self.discovered_shares = shares
-            self.log(f"Scan complete. Found {len(shares)} exported NFS share(s).")
+            hosts = self.mgr.load_hosts_from_file(file_path)
+            added = self.append_target_hosts(hosts)
+            self.log(f"Loaded {len(hosts)} host(s) from '{file_path}' ({len(added)} new targets added).")
         except Exception as e:
-            self.log(f"Scan error: {e}", level="ERROR")
-        finally:
-            self.is_scanning = False
-            self.refresh_ui_tables()
+            self.log(f"Failed to load file: {e}", level="ERROR")
 
-    def query_single_host(self, host):
-        if not host:
+    # -----------------------------------------------------------------------
+    # Scanning Actions
+    # -----------------------------------------------------------------------
+    def scan_nmap_async(self):
+        if self.is_busy:
             return
-        self.log(f"Querying exports on: {host} via showmount...")
-        shares = self.mgr.query_showmount(host.strip())
-        if not shares:
-            self.log(f"No exports found on {host} (or host unreachable).", level="WARN")
-        else:
-            self.log(f"Found {len(shares)} export(s) on {host}.")
-            # Append new shares if not already in list
-            existing_sources = {s.full_source for s in self.discovered_shares}
-            for s in shares:
-                if s.full_source not in existing_sources:
-                    self.discovered_shares.append(s)
-        self.refresh_ui_tables()
+        self.is_busy = True
+        subnet = dpg.get_value("subnet_input").strip() or None
+        scan_nfs_only = dpg.get_value("nmap_nfs_only_check")
 
+        def _worker():
+            try:
+                dpg.set_value("status_text", "Running Nmap LAN scan...")
+                results = self.mgr.scan_network_nmap(subnet=subnet, scan_nfs_port=scan_nfs_only, progress_cb=self.log)
+                hostnames = [r["host"] for r in results]
+                added = self.append_target_hosts(hostnames)
+                self.log(f"Nmap scan complete. Discovered {len(results)} host(s) ({len(added)} new targets added).")
+
+                # Automatically query showmount on all discovered hosts
+                self._query_targets_worker()
+            except Exception as e:
+                self.log(f"Nmap error: {e}", level="ERROR")
+            finally:
+                self.is_busy = False
+                self.refresh_ui_tables()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def scan_arpscan_async(self):
+        if self.is_busy:
+            return
+        self.is_busy = True
+
+        def _worker():
+            try:
+                dpg.set_value("status_text", "Running arp-scan & avahi-resolve...")
+                results = self.mgr.scan_network_arpscan(progress_cb=self.log)
+                hostnames = [r["host"] for r in results]
+                added = self.append_target_hosts(hostnames)
+                self.log(f"arp-scan & avahi-resolve complete. Found {len(results)} host(s) ({len(added)} new targets added).")
+
+                # Automatically query showmount on all discovered hosts
+                self._query_targets_worker()
+            except Exception as e:
+                self.log(f"arp-scan error: {e}", level="ERROR")
+            finally:
+                self.is_busy = False
+                self.refresh_ui_tables()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def query_targets_async(self):
+        if self.is_busy:
+            return
+        self.is_busy = True
+
+        def _worker():
+            try:
+                self._query_targets_worker()
+            finally:
+                self.is_busy = False
+                self.refresh_ui_tables()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _query_targets_worker(self):
+        hosts = self.get_current_target_hosts()
+        if not hosts:
+            self.log("Target hosts list is empty. Add hosts or run a scan first.", level="WARN")
+            return
+
+        self.log(f"Querying showmount exports on {len(hosts)} target host(s)...")
+        dpg.set_value("status_text", f"Querying showmount on {len(hosts)} host(s)...")
+
+        shares = self.mgr.query_multiple_hosts(hosts, progress_callback=lambda msg: self.log(msg))
+        self.discovered_shares = shares
+        self.log(f"Query complete. Found {len(shares)} total exported NFS share(s).")
+
+    # -----------------------------------------------------------------------
+    # Table Rendering
+    # -----------------------------------------------------------------------
     def refresh_ui_tables(self):
-        # 1. Update Active Mounts
         self.active_mounts = self.mgr.get_active_mounts()
         active_sources = {m.source: m.mount_point for m in self.active_mounts}
 
-        # Clear and rebuild Discovered Shares Table
+        # 1. Update Discovered Exports Table
         if dpg.does_item_exist("shares_table"):
             dpg.delete_item("shares_table", children_only=True)
 
-            # Table Header
             dpg.add_table_column(label="Status", width_fixed=True, init_width_or_weight=90, parent="shares_table")
-            dpg.add_table_column(label="Host", width_fixed=True, init_width_or_weight=130, parent="shares_table")
+            dpg.add_table_column(label="Host", width_fixed=True, init_width_or_weight=140, parent="shares_table")
             dpg.add_table_column(label="Remote Export Path", parent="shares_table")
-            dpg.add_table_column(label="Allowed Clients", width_fixed=True, init_width_or_weight=140, parent="shares_table")
+            dpg.add_table_column(label="Allowed Clients", width_fixed=True, init_width_or_weight=150, parent="shares_table")
             dpg.add_table_column(label="Action", width_fixed=True, init_width_or_weight=100, parent="shares_table")
 
-            for idx, share in enumerate(self.discovered_shares):
+            for share in self.discovered_shares:
                 is_mounted = share.full_source in active_sources
                 status_label = "Mounted" if is_mounted else "Available"
                 status_color = (226, 183, 20) if is_mounted else (100, 200, 120)
@@ -213,7 +279,7 @@ class NFSGuiApp:
                         )
                         dpg.bind_item_theme(btn, self.gold_btn_theme)
 
-        # Clear and rebuild Active Mounts Table
+        # 2. Update Active Mounts Table
         if dpg.does_item_exist("mounts_table"):
             dpg.delete_item("mounts_table", children_only=True)
 
@@ -238,13 +304,11 @@ class NFSGuiApp:
 
         dpg.set_value("status_text", f"Active Mounts: {len(self.active_mounts)} | Discovered Shares: {len(self.discovered_shares)}")
 
+    # -----------------------------------------------------------------------
+    # Mount Modal Dialog
+    # -----------------------------------------------------------------------
     def open_mount_modal(self, share):
-        """
-        Opens a popup dialog allowing the user to select or edit the local mount point directory.
-        """
         self.selected_share_for_mount = share
-
-        # Generate a clean default local mount point
         clean_name = share.export_path.strip("/").replace("/", "_")
         default_mount = f"/mnt/nfs_{clean_name}" if clean_name else "/mnt/nfs_share"
 
@@ -288,51 +352,115 @@ class NFSGuiApp:
                 self.log(f"Unmount failed: {out_lazy}", level="ERROR")
         self.refresh_ui_tables()
 
+    # -----------------------------------------------------------------------
+    # GUI Layout Construction
+    # -----------------------------------------------------------------------
     def build_gui(self):
         dpg.create_context()
         self.setup_monkeytype_theme()
 
-        # Primary Full-Window Container
+        # Detect initial default subnet
+        detected_subnets = self.mgr.get_local_subnets()
+        default_subnet = detected_subnets[0] if detected_subnets else "192.168.10.0/24"
+
         with dpg.window(tag="primary_window"):
-            # Header
+            # Header Bar
             with dpg.group(horizontal=True):
                 dpg.add_text("NFS MOUNT EXPLORER", color=(226, 183, 20))
                 dpg.add_text("|", color=(100, 102, 105))
-                dpg.add_text("mDNS & showmount discovery", color=(100, 102, 105))
+                dpg.add_text("Dynamic Discovery & Mount Manager", color=(100, 102, 105))
                 dpg.add_spacer(width=20)
                 dpg.add_text("Ready", tag="status_text", color=(209, 208, 197))
 
             dpg.add_separator()
+            dpg.add_spacer(height=3)
+
+            # ---------------------------------------------------------------
+            # Discovery & Target Input Panel
+            # ---------------------------------------------------------------
+            with dpg.collapsing_header(label="Network Discovery & Target Hosts", default_open=True):
+                with dpg.group(horizontal=True):
+                    # Left Column: Automated Network Scanners
+                    with dpg.child_window(width=420, height=185, border=True):
+                        dpg.add_text("Automated LAN Scanners", color=(226, 183, 20))
+                        dpg.add_spacer(height=3)
+
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Target Subnet:")
+                            dpg.add_input_text(tag="subnet_input", default_value=default_subnet, width=170)
+
+                        with dpg.group(horizontal=True):
+                            dpg.add_checkbox(tag="nmap_nfs_only_check", default_value=True)
+                            dpg.add_text("Probe NFS Port 2049 directly (Fast)")
+
+                        dpg.add_spacer(height=4)
+                        with dpg.group(horizontal=True):
+                            nmap_btn = dpg.add_button(
+                                label="Scan LAN (Nmap)",
+                                callback=lambda: self.scan_nmap_async()
+                            )
+                            dpg.bind_item_theme(nmap_btn, self.gold_btn_theme)
+
+                            arp_btn = dpg.add_button(
+                                label="Scan (arp-scan + avahi-resolve)",
+                                callback=lambda: self.scan_arpscan_async()
+                            )
+                            dpg.bind_item_theme(arp_btn, self.gold_btn_theme)
+
+                        dpg.add_spacer(height=6)
+                        dpg.add_text("File Import:", color=(100, 102, 105))
+                        with dpg.group(horizontal=True):
+                            dpg.add_input_text(tag="hosts_file_path", default_value="/etc/hosts", width=200)
+                            dpg.add_button(
+                                label="Browse...",
+                                callback=lambda: dpg.show_item("file_picker_hosts_id")
+                            )
+                            dpg.add_button(
+                                label="Load File",
+                                callback=lambda: self.load_hosts_from_file_cb()
+                            )
+
+                    # Right Column: Multiline User Input for Targets
+                    with dpg.child_window(width=-1, height=185, border=True):
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Candidate Hosts / IPs (Editable):", color=(226, 183, 20))
+                            dpg.add_spacer(width=20)
+                            dpg.add_button(
+                                label="Clear",
+                                callback=lambda: dpg.set_value("targets_text_input", "")
+                            )
+
+                        dpg.add_input_text(
+                            tag="targets_text_input",
+                            multiline=True,
+                            width=-1,
+                            height=100,
+                            hint="Enter hostnames or IPs (one per line, comma, or space separated):\ne.g.\npi02.local\n192.168.10.150\npi03.local",
+                            default_value=""
+                        )
+
+                        dpg.add_spacer(height=4)
+                        with dpg.group(horizontal=True):
+                            query_btn = dpg.add_button(
+                                label="Query Showmount on Targets",
+                                callback=lambda: self.query_targets_async()
+                            )
+                            dpg.bind_item_theme(query_btn, self.gold_btn_theme)
+
+                            dpg.add_button(
+                                label="Refresh Active Mounts",
+                                callback=lambda: self.refresh_ui_tables()
+                            )
+
             dpg.add_spacer(height=5)
 
-            # Toolbar Controls
-            with dpg.group(horizontal=True):
-                scan_btn = dpg.add_button(
-                    label="Scan Network (mDNS/DNS-SD)",
-                    callback=lambda: self.trigger_scan_async()
-                )
-                dpg.bind_item_theme(scan_btn, self.gold_btn_theme)
-
-                dpg.add_button(
-                    label="Refresh Mounts",
-                    callback=lambda: self.refresh_ui_tables()
-                )
-
-                dpg.add_spacer(width=25)
-                dpg.add_text("Direct Query:")
-                dpg.add_input_text(tag="manual_host_input", default_value="pi02.local", width=160, hint="e.g. pi02.local")
-                dpg.add_button(
-                    label="Query Host",
-                    callback=lambda: self.query_single_host(dpg.get_value("manual_host_input"))
-                )
-
-            dpg.add_spacer(height=10)
-
-            # Tab Bar for Navigation
+            # ---------------------------------------------------------------
+            # Tables: Discovered Exports & Active Mounts
+            # ---------------------------------------------------------------
             with dpg.tab_bar():
                 # Tab 1: Discovered NFS Exports
-                with dpg.tab(label="Discovered Exports"):
-                    with dpg.child_window(height=260, border=True):
+                with dpg.tab(label="Discovered NFS Exports"):
+                    with dpg.child_window(height=230, border=True):
                         with dpg.table(
                             tag="shares_table",
                             header_row=True,
@@ -344,14 +472,14 @@ class NFSGuiApp:
                             resizable=True
                         ):
                             dpg.add_table_column(label="Status", width_fixed=True, init_width_or_weight=90)
-                            dpg.add_table_column(label="Host", width_fixed=True, init_width_or_weight=130)
+                            dpg.add_table_column(label="Host", width_fixed=True, init_width_or_weight=140)
                             dpg.add_table_column(label="Remote Export Path")
-                            dpg.add_table_column(label="Allowed Clients", width_fixed=True, init_width_or_weight=140)
+                            dpg.add_table_column(label="Allowed Clients", width_fixed=True, init_width_or_weight=150)
                             dpg.add_table_column(label="Action", width_fixed=True, init_width_or_weight=100)
 
                 # Tab 2: Active OS Mounts
                 with dpg.tab(label="Active System Mounts"):
-                    with dpg.child_window(height=260, border=True):
+                    with dpg.child_window(height=230, border=True):
                         with dpg.table(
                             tag="mounts_table",
                             header_row=True,
@@ -368,17 +496,17 @@ class NFSGuiApp:
                             dpg.add_table_column(label="Disk Capacity / Free", width_fixed=True, init_width_or_weight=180)
                             dpg.add_table_column(label="Action", width_fixed=True, init_width_or_weight=100)
 
-            dpg.add_spacer(height=5)
+            dpg.add_spacer(height=3)
 
-            # Activity / Command Log Box
+            # Activity Log Panel
             with dpg.collapsing_header(label="Execution & Activity Log", default_open=True):
                 dpg.add_input_text(
                     tag="log_box",
                     multiline=True,
                     readonly=True,
                     width=-1,
-                    height=130,
-                    default_value="[System] NFS Explorer initialized. Monkeytype theme loaded."
+                    height=110,
+                    default_value="[System] NFS Explorer ready. Input target hosts, load a file, or click a network scan."
                 )
 
         # -------------------------------------------------------------------
@@ -390,8 +518,8 @@ class NFSGuiApp:
             modal=True,
             show=False,
             no_resize=True,
-            width=500,
-            height=300
+            width=520,
+            height=310
         ):
             dpg.add_text("Configure Local Mount Destination", color=(226, 183, 20))
             dpg.add_separator()
@@ -404,10 +532,10 @@ class NFSGuiApp:
             dpg.add_spacer(height=5)
             dpg.add_text("Local Mount Directory:")
             with dpg.group(horizontal=True):
-                dpg.add_input_text(tag="modal_mount_point", width=360, default_value="/mnt/nfs_share")
+                dpg.add_input_text(tag="modal_mount_point", width=380, default_value="/mnt/nfs_share")
                 dpg.add_button(
                     label="Browse",
-                    callback=lambda: dpg.show_item("file_dialog_id")
+                    callback=lambda: dpg.show_item("file_picker_dir_id")
                 )
 
             dpg.add_spacer(height=5)
@@ -419,7 +547,7 @@ class NFSGuiApp:
             dpg.add_input_text(tag="modal_sudo_pwd", password=True, width=-1, hint="Leave empty if using polkit or passwordless sudo")
 
             dpg.add_text("", tag="modal_error_text", color=(202, 71, 84))
-            dpg.add_spacer(height=10)
+            dpg.add_spacer(height=8)
 
             with dpg.group(horizontal=True):
                 confirm_btn = dpg.add_button(
@@ -433,7 +561,10 @@ class NFSGuiApp:
                     callback=lambda: dpg.configure_item("mount_modal", show=False)
                 )
 
-        # Directory Picker Dialog
+        # -------------------------------------------------------------------
+        # File & Directory Pickers
+        # -------------------------------------------------------------------
+        # Directory Picker for Mount Point
         def _dir_selected_cb(sender, app_data):
             selected_path = app_data.get("file_path_name")
             if selected_path:
@@ -443,20 +574,35 @@ class NFSGuiApp:
             directory_selector=True,
             show=False,
             callback=_dir_selected_cb,
-            tag="file_dialog_id",
+            tag="file_picker_dir_id",
             width=500,
             height=350
         )
 
-        # Viewport Setup
-        dpg.create_viewport(title="NFS Mount Explorer (Monkeytype Theme)", width=850, height=620)
+        # File Picker for Hosts File
+        def _hosts_file_selected_cb(sender, app_data):
+            selected_path = app_data.get("file_path_name")
+            if selected_path:
+                dpg.set_value("hosts_file_path", selected_path)
+                self.load_hosts_from_file_cb()
+
+        dpg.add_file_dialog(
+            directory_selector=False,
+            show=False,
+            callback=_hosts_file_selected_cb,
+            tag="file_picker_hosts_id",
+            width=500,
+            height=350
+        )
+
+        # Viewport Initialization
+        dpg.create_viewport(title="NFS Mount Explorer (Monkeytype Theme)", width=890, height=690)
         dpg.setup_dearpygui()
         dpg.set_primary_window("primary_window", True)
         dpg.show_viewport()
 
-        # Initial populate
+        # Initial Active Mounts Populate
         self.refresh_ui_tables()
-        self.trigger_scan_async()
 
         dpg.start_dearpygui()
         dpg.destroy_context()
@@ -465,4 +611,3 @@ class NFSGuiApp:
 if __name__ == "__main__":
     app = NFSGuiApp()
     app.build_gui()
-
