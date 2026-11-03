@@ -194,3 +194,73 @@ srun --chdir=/tmp --bcast=/tmp/sim_pi_arm -N 2 /tmp/sim_pi_arm
 5. **Debian OpenMPI Lacking PMI**: The default OpenMPI package on Debian 12 is not compiled against Slurm's PMI libraries, preventing `srun` from natively launching MPI communicators out-of-the-box (yielding `OMPI was not built with SLURM's PMI support`). This limitation was bypassed by relying on Slurm's native task environment variables (`SLURM_PROCID`) for parallelization instead of MPI.
 6. **No Shared Filesystem (Resolved via NFS)**: Because `/home/isaac-aneek` does not exist on the Pis, Slurm originally failed to find the working directory or the executable without `--bcast`. Furthermore, edge worker nodes quickly ran out of disk space (`No space left on device`) when trying to copy machine learning datasets locally via `scp`. This limitation was comprehensively solved by configuring an **NFSv4 mount (`/mnt/nfs_share`)** across both Pis, allowing datasets and scripts to be shared with zero-copy overhead.
 7. **Cross-Architecture Execution (x86 vs ARM)**: Binaries compiled on the controller immediately triggered `Exec format error` on the compute nodes. Overcome by compiling natively via SSH on the edge devices.
+
+
+---
+
+## Part 5: Standalone Pretrained YOLOv3 (`distML/yolo_pretrained/`)
+
+A completely self-contained, single-node implementation of **YOLOv3-Tiny** with official Darknet pretrained weights. Designed for standalone execution on a single node without any distributed cluster, Slurm, or multi-node overhead.
+
+### 1. Zero-Ultralytics Pure PyTorch Architecture
+* Uses native PyTorch modules with a custom binary parser (`yolo_model.py`) that reads official Darknet `.weights` files (`yolov3-tiny.weights`) directly into PyTorch tensors.
+* Eliminates heavy third-party framework dependencies (`ultralytics` package is NOT required).
+
+### 2. Modular Structure
+* `yolo_model.py`: Pure PyTorch YOLOv3-Tiny architecture, native Darknet weight loader, and PyTorch Non-Maximum Suppression (NMS).
+* `dataset.py`: Standalone dataset module that downloads COCO128 (~7MB) into `images/` and `labels/` folders (with an automatic synthetic fallback generator for offline environments), and provides the `YOLOFolderDataset` loader.
+* `inference.py`: Runs a single inference pass on a local image or URL, prints a formatted detection table, and saves the annotated bounding-box image to `./runs/inference/output.jpg`.
+* `train.py`: Fine-tunes the detection heads on local dataset folders and saves checkpoint weights to `./runs/yolov3_trained.pt`.
+
+### 3. Execution Commands
+```bash
+cd ~/Practice/System/distML/yolo_pretrained
+
+# Pre-download & verify dataset
+python3 dataset.py
+
+# Run standalone inference
+python3 inference.py --source /path/to/image.jpg
+
+# Run single-node training (3 epochs, batch size 4)
+python3 train.py --epochs 3 --batch-size 4
+```
+
+---
+
+## Part 6: Dear ImGui NFS Mount Explorer GUI (`gui/`)
+
+A desktop graphical user interface built with **Dear ImGui** (`dearpygui`) styled in the **Monkeytype** color palette. It automates finding, inspecting, mounting, and unmounting NFS file systems across your local network.
+
+### 1. Dynamic Network Discovery (Zero Hardcoded Hosts)
+* **Editable Targets Multiline Box**: Directly enter, paste, or edit hostnames and IPs (e.g. `pi02.local`, `192.168.10.150`).
+* **File Import**: Browse and load candidate hosts from files such as `/etc/hosts` or custom lists.
+* **Scan LAN (Nmap)**: Auto-detects local IPv4 subnets (e.g. `192.168.10.0/24`) and scans for open NFS ports (`-p 2049 --open`) to locate servers instantly.
+* **Scan (arp-scan + avahi-resolve)**: Discovers active LAN devices using ARP sweeps and resolves each IP to its **`.local` mDNS hostname** using `avahi-resolve -a <IP>`.
+* **Export Inspection (`showmount`)**: Queries `showmount -e` across all identified hosts to display exported directories and allowed client subnets.
+
+### 2. Interactive Mount Modal & Local FS-Cache
+* **Mount Point Selection**: Enter a custom path or use the built-in directory browser dialog. Automatically executes `mkdir -p` if the folder doesn't exist.
+* **Enable Disk Cache (`-o fsc`)**: Checkbox that appends the `-o fsc` flag to mount options for local SSD/disk read acceleration via Linux FS-Cache.
+  * *Hover Tooltip*: Informs the user that the `cachefilesd` daemon must be running (`sudo apt install -y cachefilesd && sudo systemctl enable --now cachefilesd`).
+* **Privilege Handling**: Seamlessly executes mount operations using `pkexec` (Polkit GUI prompt) or user-supplied sudo credentials.
+
+### 3. Active OS Mounts Management
+* Parses `/proc/mounts` in real-time to display active NFS mounts attached to the system.
+* Displays live disk capacity and available storage percentages (`os.statvfs`).
+* Provides a one-click **"Unmount"** button with automatic fallback to lazy unmounting (`-l`).
+
+### 4. Monkeytype Visual Styling
+* Background: Matte Charcoal (`#323437`)
+* Panels & Frames: Deep Slate (`#2c2e31` / `#242628`)
+* Primary Text: Off-White / Cream (`#d1d0c5`)
+* Action Buttons & Accents: Monkeytype Gold (`#e2b714`)
+* Danger / Unmount: Muted Crimson (`#ca4754`)
+
+### 5. Launching the GUI
+```bash
+cd ~/Practice/System/gui
+chmod +x run.sh app.py nfs_manager.py
+./run.sh
+```
+*(The `run.sh` script automatically checks for `dearpygui`, sets up an isolated virtual environment if missing, and launches the application).*
