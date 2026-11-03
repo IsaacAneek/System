@@ -27,6 +27,9 @@ A fast, dynamic desktop GUI built with **Dear ImGui** (`dearpygui`) that discove
 * Clicking **"Mount..."** opens an interactive pop-up dialog.
 * **Mount Point Selection**: Type a custom path (defaults to `/mnt/nfs_<export_name>`) or click **Browse** to open an interactive directory picker.
 * **Mount Options**: Configurable options string (default: `rw,sync,noatime,_netdev`).
+* **Enable Disk Cache (`-o fsc`)**:
+  * Checkbox to append the `-o fsc` flag for local FS-Cache disk acceleration.
+  * **Hover Tooltip**: Displays a notice that the `cachefilesd` daemon must be installed and running on the OS (`sudo apt install -y cachefilesd && sudo systemctl enable --now cachefilesd`).
 * **Privilege Handling**: Supports polkit (`pkexec`) or sudo password input.
 * **Auto-creation**: Automatically runs `mkdir -p` if the target mount directory doesn't exist yet.
 

@@ -307,6 +307,16 @@ class NFSGuiApp:
     # -----------------------------------------------------------------------
     # Mount Modal Dialog
     # -----------------------------------------------------------------------
+    def _toggle_fsc_option(self, sender, app_data):
+        curr_text = dpg.get_value("modal_options").strip()
+        opts = [o.strip() for o in curr_text.split(",") if o.strip()]
+        if app_data:  # checked
+            if "fsc" not in opts:
+                opts.append("fsc")
+        else:  # unchecked
+            opts = [o for o in opts if o != "fsc"]
+        dpg.set_value("modal_options", ",".join(opts))
+
     def open_mount_modal(self, share):
         self.selected_share_for_mount = share
         clean_name = share.export_path.strip("/").replace("/", "_")
@@ -314,6 +324,8 @@ class NFSGuiApp:
 
         dpg.set_value("modal_source_text", share.full_source)
         dpg.set_value("modal_mount_point", default_mount)
+        dpg.set_value("modal_options", "rw,sync,noatime,_netdev")
+        dpg.set_value("modal_fsc_check", False)
         dpg.set_value("modal_error_text", "")
         dpg.configure_item("mount_modal", show=True)
 
@@ -321,13 +333,19 @@ class NFSGuiApp:
         share = self.selected_share_for_mount
         mount_point = dpg.get_value("modal_mount_point").strip()
         options = dpg.get_value("modal_options").strip()
+        fsc_enabled = dpg.get_value("modal_fsc_check")
         pwd = dpg.get_value("modal_sudo_pwd").strip() or None
 
         if not mount_point:
             dpg.set_value("modal_error_text", "Error: Mount point path cannot be empty.")
             return
 
-        self.log(f"Attempting mount: {share.full_source} -> {mount_point}...")
+        opt_list = [o.strip() for o in options.split(",") if o.strip()]
+        if fsc_enabled and "fsc" not in opt_list:
+            opt_list.append("fsc")
+        options = ",".join(opt_list)
+
+        self.log(f"Attempting mount: {share.full_source} -> {mount_point} (opts: {options})...")
         success, out = self.mgr.mount_share(share.full_source, mount_point, options=options, sudo_password=pwd)
 
         if success:
@@ -518,8 +536,8 @@ class NFSGuiApp:
             modal=True,
             show=False,
             no_resize=True,
-            width=520,
-            height=310
+            width=540,
+            height=365
         ):
             dpg.add_text("Configure Local Mount Destination", color=(226, 183, 20))
             dpg.add_separator()
@@ -532,7 +550,7 @@ class NFSGuiApp:
             dpg.add_spacer(height=5)
             dpg.add_text("Local Mount Directory:")
             with dpg.group(horizontal=True):
-                dpg.add_input_text(tag="modal_mount_point", width=380, default_value="/mnt/nfs_share")
+                dpg.add_input_text(tag="modal_mount_point", width=400, default_value="/mnt/nfs_share")
                 dpg.add_button(
                     label="Browse",
                     callback=lambda: dpg.show_item("file_picker_dir_id")
@@ -541,6 +559,23 @@ class NFSGuiApp:
             dpg.add_spacer(height=5)
             dpg.add_text("Mount Options:")
             dpg.add_input_text(tag="modal_options", width=-1, default_value="rw,sync,noatime,_netdev")
+
+            dpg.add_spacer(height=4)
+            # Enable Disk Cache Checkbox with Hover Tooltip
+            with dpg.group(horizontal=True):
+                fsc_cb = dpg.add_checkbox(
+                    tag="modal_fsc_check",
+                    label="Enable Disk Cache (-o fsc)",
+                    default_value=False,
+                    callback=self._toggle_fsc_option
+                )
+                with dpg.tooltip(fsc_cb):
+                    dpg.add_text(
+                        "Note: Enables local FS-Cache for this NFS mount (-o fsc).\n"
+                        "Requires the 'cachefilesd' service to be installed and running on this OS\n"
+                        "(e.g., sudo apt install -y cachefilesd && sudo systemctl enable --now cachefilesd).",
+                        color=(226, 183, 20)
+                    )
 
             dpg.add_spacer(height=5)
             dpg.add_text("Sudo Password (if required):")
